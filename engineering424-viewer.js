@@ -1,14 +1,38 @@
 'use strict';
+const kr90LoadingUI=KR90Loading.createUI(document);
 (async function(){
 const $=id=>document.getElementById(id),cv=$('view'),K=KR90State,E=KR90Engineering424,C=KR90Engineering424Cache,{add,sub,scale,dot,cross,unit}=K;
 let DATA,MESH,META,BUNDLE,PARTITION,envelope,currentCase,store,geometry=null,activeGPU=null,frameIndex=0,playing=false,lastPlayback=0,drawCount=0,drawn=null,selected=-1,dirty=true,requestCounter=0;
+let ready=false,startupController=null;
 let view={yaw:0,pitch:.65,dist:2,center:[.35,0,-.1]};
 const status=(s,bad=false)=>{$('status').title='';$('status').textContent=s;$('status').className='status'+(bad?' stop':'');};
-async function sha(text){const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text));return Array.from(new Uint8Array(b)).map(v=>v.toString(16).padStart(2,'0')).join('');}
 function freeze(o){if(o&&typeof o==='object'&&!Object.isFrozen(o)){Object.values(o).forEach(freeze);Object.freeze(o);}return o;}
-async function readText(url){const r=await fetch(url,{cache:'no-store'});if(!r.ok)throw Error('记录尚未就绪');return r.text();}
-try{BUNDLE=JSON.parse(await readText('bundle.json'));if(BUNDLE.schema!=='KR90_ENGINEERING424_VIEWER_BUNDLE_V1'||BUNDLE.trace_file!=='trace.json')throw Error('来源索引无效');const [traceText,meshText]=await Promise.all([readText('trace.json'),readText('mesh.json')]);if(await sha(traceText)!==BUNDLE.trace_sha256)throw Error('轨迹 SHA256 不匹配');if(await sha(meshText)!==BUNDLE.mesh_sha256)throw Error('CAD SHA256 不匹配');DATA=freeze(E.validateTrace(JSON.parse(traceText)));MESH=freeze(JSON.parse(meshText));META=DATA.metadata;if(BUNDLE.render_policy_file!=='render-policy.json'||typeof BUNDLE.render_policy_sha256!=='string')throw Error('424 几何策略缺失');const policyText=await readText('render-policy.json');if(await sha(policyText)!==BUNDLE.render_policy_sha256)throw Error('几何策略 SHA256 不匹配');PARTITION=freeze(E.validateHousingPartition(JSON.parse(policyText),MESH,META));if(!PARTITION.source_pins.some(p=>p.path.endsWith('/TRAJECTORY.json')&&p.sha256===BUNDLE.trace_sha256))throw Error('几何策略与轨迹不匹配');envelope=new Float64Array(DATA.frames.flatMap(f=>f.edge_endpoints_root_m.flat(2)));if(BUNDLE.frame_count!==DATA.frames.length)throw Error('帧数量不匹配');}catch(e){status(String(e.message||e),true);return;}
-const renderer=KR90Renderer.create(cv);
+const paint=()=>new Promise(resolve=>setTimeout(resolve,0));
+async function phase(text,signal){kr90LoadingUI.setPhase(text);await paint();if(signal?.aborted)throw Object.assign(new Error('已取消加载'),{name:'AbortError'});}
+while(true){
+ const controller=new AbortController();startupController=controller;kr90LoadingUI.start(controller);const signal=controller.signal;
+ try{
+  const manifest=await KR90Loading.readAsset({url:'bundle.json',label:'文件索引',signal,cache:'no-cache'});
+  await phase('解析文件索引',signal);BUNDLE=JSON.parse(manifest.text);
+  if(BUNDLE.schema!=='KR90_ENGINEERING424_VIEWER_BUNDLE_V1'||BUNDLE.trace_file!=='trace.json')throw Error('来源索引无效');
+  if(BUNDLE.render_policy_file!=='render-policy.json'||typeof BUNDLE.render_policy_sha256!=='string')throw Error('424 几何策略缺失');
+  const specs=[['trace','trace.json','计算帧',BUNDLE.trace_sha256],['mesh','mesh.json','机器人 / 外壳',BUNDLE.mesh_sha256],['policy','render-policy.json','显示策略',BUNDLE.render_policy_sha256]];
+  for(const [key,file,label]of specs)kr90LoadingUI.update(key,{phase:'download',label,receivedBytes:0,totalBytes:Number.isSafeInteger(BUNDLE.decoded_asset_bytes?.[file])?BUNDLE.decoded_asset_bytes[file]:null});
+  const texts=await Promise.all(specs.map(async([key,file,label,hash])=>{
+   if(typeof hash!=='string'||! /^[a-f0-9]{64}$/.test(hash))throw Error(label+' SHA256 索引无效');
+   return (await KR90Loading.readAsset({url:file+'?v='+hash,label,expectedBytes:BUNDLE.decoded_asset_bytes?.[file],expectedSha256:hash,signal,onProgress:event=>{if(!signal.aborted)kr90LoadingUI.update(key,event);}})).text;
+  }));
+  await phase('解析计算帧',signal);const parsedTrace=JSON.parse(texts[0]);
+  await phase('验证原生帧与完整管线',signal);DATA=freeze(E.validateTrace(parsedTrace));META=DATA.metadata;
+  await phase('解析机器人 / 外壳',signal);MESH=freeze(JSON.parse(texts[1]));
+  await phase('验证 CAD 分区与显示策略',signal);PARTITION=freeze(E.validateHousingPartition(JSON.parse(texts[2]),MESH,META));
+  if(!PARTITION.source_pins.some(p=>p.path.endsWith('/TRAJECTORY.json')&&p.sha256===BUNDLE.trace_sha256))throw Error('几何策略与轨迹不匹配');
+  envelope=new Float64Array(DATA.frames.flatMap(f=>f.edge_endpoints_root_m.flat(2)));if(BUNDLE.frame_count!==DATA.frames.length)throw Error('帧数量不匹配');
+  break;
+ }catch(e){controller.abort();status(String(e.message||e),true);kr90LoadingUI.fail(e);await kr90LoadingUI.waitForRetry();}
+}
+await phase('初始化 3D 显示',startupController.signal);
+const renderer=KR90Renderer.create(cv);if(renderer.mode==='unavailable')throw Error('当前浏览器无法绘制模型，请更换支持 3D 的浏览器后重试');
 $('rendererMode').textContent=renderer.mode==='canvas2d-cpu'?'CPU 投影':renderer.mode==='unavailable'?'渲染不可用':'3D';$('rendererMode').title=renderer.label;
 const gpuCache=C.createUploadCache(renderer),upload=(g,mode='triangles')=>gpuCache.acquire(g,mode),dispose=b=>gpuCache.release(b),draw=(b,o=1,t=null)=>renderer.draw(gpuCache.buffer(b),o,t);
 function disposeScene(s){if(!s)return;for(const b of [...s.robots,s.cable,s.housing,s.guide,s.retractor,s.directors])dispose(b);}
@@ -23,7 +47,7 @@ async function applyFrame(index){
 // Display rounding only: retain exact signed source numbers in data/QA.
 function displayFixed(x,d){const text=x.toFixed(d);return Number(text)===0?(0).toFixed(d):text;}
 function updateReadouts(f){
- $('timeline').max=currentCase.frames.length-1;$('timeline').value=frameIndex;$('timeline').disabled=currentCase.frames.length<2;
+ $('timeline').max=currentCase.frames.length-1;$('timeline').value=frameIndex;$('timeline').disabled=!ready||currentCase.frames.length<2;
  $('frameCount').textContent=(frameIndex+1)+' / '+currentCase.frames.length;
  $('generation').textContent='F'+f.frame_index+' · 间隙 '+(f.max_joint_gap_m*1e6).toFixed(1)+' μm';$('generation').title='原始最大原生关节间隙；表面桥接仅用于显示，不改变碰撞或数值状态';
  $('time').innerHTML=f.time_s.toFixed(3)+' <small>s</small>';
@@ -31,10 +55,10 @@ function updateReadouts(f){
  $('velocity').innerHTML=displayFixed(f.slider_qdot_m_s*1000,3)+' <small>mm/s</small>';
  for(let i=0;i<6;i++)$('a'+(i+1)).textContent=displayFixed(f.joint_angles_deg[i],i<3?0:3)+'°';
  const bend=f.diagnostics.bend;$('bendWarning').textContent='最小离散弯曲半径 '+(bend.min_discrete_radius_m*1000).toFixed(1)+' mm · '+bend.joints_below_conditional_150mm+' 处 < 150 mm（条件对照）';$('bendWarning').classList.toggle('below',bend.joints_below_conditional_150mm>0);
- $('picked').textContent='';$('play').disabled=currentCase.frames.length<2;status('计算帧');
+ $('picked').textContent='';$('play').disabled=!ready||currentCase.frames.length<2;status(ready?'计算帧':'准备首帧');
 }
 function setPlaying(on){playing=on;$('play').textContent=on?'暂停':'播放';$('play').setAttribute('aria-pressed',String(on));lastPlayback=performance.now();}
-async function choose(){setPlaying(false);currentCase=DATA;store=new E.AtomicStore(META);if(await applyFrame(0))fit();}
+async function choose(){setPlaying(false);currentCase=DATA;store=new E.AtomicStore(META);if(await applyFrame(0)){fit();return true;}return false;}
 $('timeline').oninput=e=>{setPlaying(false);applyFrame(+e.target.value);};
 $('play').onclick=async()=>{if(playing){setPlaying(false);return;}if(frameIndex===currentCase.frames.length-1&&!await applyFrame(0))return;setPlaying(true);};
 function camera(){const eye=add(view.center,scale([Math.cos(view.pitch)*Math.sin(view.yaw),-Math.cos(view.pitch)*Math.cos(view.yaw),Math.sin(view.pitch)],view.dist)),z=unit(sub(eye,view.center)),x=unit(cross([0,0,1],z)),y=cross(z,x);return{eye,z,x,y};}
@@ -61,12 +85,14 @@ let previousCanvasWidth=0;
 const resize=new ResizeObserver(()=>{const width=cv.clientWidth,height=cv.clientHeight,d=Math.min(devicePixelRatio||1,renderer.mode==='canvas2d-cpu'?1:2);cv.width=Math.round(width*d);cv.height=Math.round(height*d);if(geometry&&previousCanvasWidth&&Math.abs(width-previousCanvasWidth)>1)fitSets(allSets(),true);previousCanvasWidth=width;dirty=true;});resize.observe(cv);
 cv.addEventListener('webglcontextlost',e=>{e.preventDefault();setPlaying(false);status('显示中断，记录未改变',true);});
 async function render(ts){
+ try{
  const next=currentCase.frames[frameIndex+1],delay=next?Math.max(16,(next.time_s-currentCase.frames[frameIndex].time_s)*1000):0;
  if(playing&&ts-lastPlayback>=delay){lastPlayback=ts;if(next)await applyFrame(frameIndex+1);else setPlaying(false);}
- if(dirty&&activeGPU){renderer.begin(camera(),viewMatrix(camera()),projection(cv.width/Math.max(1,cv.height)));const inside=$('inside').checked;if(!inside)draw(activeGPU.housing);if($('showGuide').checked)draw(activeGPU.guide);if($('showRobot').checked)for(let i=0;i<activeGPU.robots.length;i++)draw(activeGPU.robots[i],1,selected===i?[.96,.75,.23]:null);draw(activeGPU.retractor,1,selected===-4?[1,.77,.21]:null);draw(activeGPU.cable,1,selected===-2?[.34,.8,.81]:null);if($('showDirectors').checked)draw(activeGPU.directors);if(inside)draw(activeGPU.housing,.12);renderer.end();drawn={frameIndex:store.current.frame_index,time_s:store.current.time_s,traceSha:BUNDLE.trace_sha256};cv.dataset.frameIndex=String(drawn.frameIndex);cv.dataset.renderedTimeS=String(drawn.time_s);cv.dataset.traceSha256=drawn.traceSha;cv.dataset.displayScope=META.scope;cv.dataset.renderer=renderer.mode;cv.dataset.renderedJointsDeg=JSON.stringify(store.current.joint_angles_deg);cv.dataset.sliderQM=String(store.current.slider_q_m);cv.dataset.rawMaxJointGapM=String(store.current.max_joint_gap_m);cv.dataset.surfaceBridgeCount=String(geometry.cable.renderOnlyJointBridges||0);cv.dataset.housingOpacity=String(inside?.12:1);cv.dataset.guideVisible=String($('showGuide').checked);cv.dataset.viewYaw=String(view.yaw);cv.dataset.viewPitch=String(view.pitch);cv.dataset.viewDistance=String(view.dist);cv.dataset.cacheUploads=String(gpuCache.stats().uploads);cv.dataset.cacheReuseHits=String(gpuCache.stats().hits);dirty=false;drawCount++;}requestAnimationFrame(render);
+ if(dirty&&activeGPU){renderer.begin(camera(),viewMatrix(camera()),projection(cv.width/Math.max(1,cv.height)));const inside=$('inside').checked;if(!inside)draw(activeGPU.housing);if($('showGuide').checked)draw(activeGPU.guide);if($('showRobot').checked)for(let i=0;i<activeGPU.robots.length;i++)draw(activeGPU.robots[i],1,selected===i?[.96,.75,.23]:null);draw(activeGPU.retractor,1,selected===-4?[1,.77,.21]:null);draw(activeGPU.cable,1,selected===-2?[.34,.8,.81]:null);if($('showDirectors').checked)draw(activeGPU.directors);if(inside)draw(activeGPU.housing,.12);renderer.end();drawn={frameIndex:store.current.frame_index,time_s:store.current.time_s,traceSha:BUNDLE.trace_sha256};cv.dataset.frameIndex=String(drawn.frameIndex);cv.dataset.renderedTimeS=String(drawn.time_s);cv.dataset.traceSha256=drawn.traceSha;cv.dataset.displayScope=META.scope;cv.dataset.renderer=renderer.mode;cv.dataset.renderedJointsDeg=JSON.stringify(store.current.joint_angles_deg);cv.dataset.sliderQM=String(store.current.slider_q_m);cv.dataset.rawMaxJointGapM=String(store.current.max_joint_gap_m);cv.dataset.surfaceBridgeCount=String(geometry.cable.renderOnlyJointBridges||0);cv.dataset.housingOpacity=String(inside?.12:1);cv.dataset.guideVisible=String($('showGuide').checked);cv.dataset.viewYaw=String(view.yaw);cv.dataset.viewPitch=String(view.pitch);cv.dataset.viewDistance=String(view.dist);cv.dataset.cacheUploads=String(gpuCache.stats().uploads);cv.dataset.cacheReuseHits=String(gpuCache.stats().hits);dirty=false;drawCount++;if(!ready){ready=true;for(const id of ['fit','showRobot','inside','showGuide','showDirectors','debugSegments'])$(id).disabled=false;updateReadouts(store.current);kr90LoadingUI.ready();}}requestAnimationFrame(render);
+ }catch(e){setPlaying(false);status('绘制失败，记录未改变',true);kr90LoadingUI.fatal(e);}
 }
 window.kr90QA=()=>({schema:DATA.schema,displayScope:META.scope,actualHousingRendered:true,mode:'computed_trajectory_replay',liveSolver:false,frameIndex,frameCount:currentCase.frames.length,time_s:store.current?.time_s,traceSha:BUNDLE.trace_sha256,q:store.current?.slider_q_m,modelAngles:store.current?[...store.current.joint_angles_deg]:null,cameraUp:[0,0,1],drawn,drawCount,playing,selected,uploadCache:gpuCache.stats(),rigidCache:E.rigidCacheStats(),view:JSON.parse(JSON.stringify(view)),renderer:renderer.mode,renderStats:renderer.stats?renderer.stats():null,glError:renderer.error(),cableEdges:store.current?.edge_endpoints_root_m.length,materialRotations:store.current?.edge_material_rotations_root.length,renderOnlyJointBridges:geometry?.cable.renderOnlyJointBridges||0,segmentedDebug:$('debugSegments').checked,wholeRestLength_m:META.whole_rest_length_m,maxJointGap_m:store.current?.max_joint_gap_m,calibration:false,strictAdmission:false,interpolation:false,float64BeforeGPU:true,error:store.lastError});
 $('debugSegmentsLabel').hidden=!E.validateJointSurfacePolicy(PARTITION);
 $('pageMode').textContent='CAD 候选回放';$('scopeBadge').textContent='非安装验收';$('sliderLabel').textContent='H 位置示意';$('guideTag').hidden=!$('showGuide').checked;$('guideTag').textContent='解析导向假设';$('fixtureNotice').hidden=false;$('fixtureNotice').textContent='A3–A6 建模段 '+META.whole_rest_length_m.toFixed(3)+' m · '+(META.config.natural_mode==='initial_stress_free'?'CAD 初态无应力/静止':'直线无应力初态/静止')+' · 重力平衡未验证 · A6 自由摆转基线 · 内束 / H / 材料未校准 · 历史软U参数均匀全链假设，非实物标定';
-await choose(0);requestAnimationFrame(render);
-})().catch(e=>{const s=document.getElementById('status');s.textContent=String(e);s.className='status stop';console.error(e);});
+await phase('构建首帧几何',startupController.signal);if(!await choose(0))throw Error('首帧构建失败，请重试');await phase('绘制首帧',startupController.signal);requestAnimationFrame(render);
+})().catch(e=>{const s=document.getElementById('status');s.textContent=String(e);s.className='status stop';kr90LoadingUI.fatal(e);console.error(e);});
