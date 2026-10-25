@@ -2,6 +2,7 @@
 /* Fetch counts are decoded response bytes, never Content-Length or invented time. */
 (function(root){
 const abortError=()=>Object.assign(new Error('已取消加载'),{name:'AbortError'});
+function errorMessage(e){return e?.name==='AbortError'?'已取消加载，点击重试重新开始':String(e?.message||e);}
 function check(signal){if(signal?.aborted)throw abortError();}
 function formatBytes(n){return n<1000?n+' B':n<1e6?(n/1000).toFixed(1)+' KB':(n/1e6).toFixed(2)+' MB';}
 async function readAsset({url,label=url,expectedBytes,expectedSha256,signal,onProgress=()=>{},fetchImpl=root.fetch,cryptoImpl=root.crypto,cache='default'}){
@@ -28,9 +29,9 @@ function createUI(doc){
  $('loadingTitle').textContent=values.some(v=>v.phase==='download')?'接收回放数据':values.some(v=>v.phase==='verify')?'SHA256 完整性校验':'数据校验完成';panel.dataset.phase=$('loadingTitle').textContent;
  }
  function start(c){controller=c;states.clear();panel.hidden=false;panel.classList.remove('load-error');$('loadingRetry').hidden=true;$('loadingCancel').hidden=false;$('loadingCancel').disabled=false;for(const row of Object.values(rows))row.textContent='等待响应';setPhase('连接 / 等待响应');$('loadingDetail').textContent='正在获取文件索引 · 总大小未知';$('loadingCancel').onclick=()=>{controller?.abort();$('loadingCancel').disabled=true;};}
- function fail(e){controller?.abort();panel.hidden=false;panel.classList.add('load-error');setPhase(e.name==='AbortError'?'已取消加载':'加载未完成');$('loadingDetail').textContent=String(e.message||e);$('loadingCancel').hidden=true;$('loadingRetry').hidden=false;}
+ function fail(e){controller?.abort();panel.hidden=false;panel.classList.add('load-error');setPhase(e.name==='AbortError'?'已取消加载':'加载未完成');$('loadingDetail').textContent=errorMessage(e);$('loadingCancel').hidden=true;$('loadingRetry').hidden=false;}
  function ready(){panel.hidden=true;doc.body.dataset.loading='false';$('viewerMain').setAttribute('aria-busy','false');}
  return{start,update,setPhase,fail,ready,waitForRetry:()=>new Promise(resolve=>{$('loadingRetry').onclick=()=>{ $('loadingRetry').disabled=true;resolve();$('loadingRetry').disabled=false;};}),fatal:e=>{fail(e);$('loadingRetry').onclick=()=>root.location.reload();}};
 }
-const api={readAsset,formatBytes,createUI};if(typeof module!=='undefined'&&module.exports)module.exports=api;root.KR90Loading=api;
+const api={readAsset,formatBytes,errorMessage,createUI};if(typeof module!=='undefined'&&module.exports)module.exports=api;root.KR90Loading=api;
 })(typeof globalThis!=='undefined'?globalThis:this);

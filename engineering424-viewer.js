@@ -29,7 +29,7 @@ while(true){
   if(!PARTITION.source_pins.some(p=>p.path.endsWith('/TRAJECTORY.json')&&p.sha256===BUNDLE.trace_sha256))throw Error('几何策略与轨迹不匹配');
   envelope=new Float64Array(DATA.frames.flatMap(f=>f.edge_endpoints_root_m.flat(2)));if(BUNDLE.frame_count!==DATA.frames.length)throw Error('帧数量不匹配');
   break;
- }catch(e){controller.abort();status(String(e.message||e),true);kr90LoadingUI.fail(e);await kr90LoadingUI.waitForRetry();}
+ }catch(e){controller.abort();status(KR90Loading.errorMessage(e),true);kr90LoadingUI.fail(e);await kr90LoadingUI.waitForRetry();}
 }
 await phase('初始化 3D 显示',startupController.signal);
 const renderer=KR90Renderer.create(cv);if(renderer.mode==='unavailable')throw Error('当前浏览器无法绘制模型，请更换支持 3D 的浏览器后重试');
@@ -95,4 +95,4 @@ window.kr90QA=()=>({schema:DATA.schema,displayScope:META.scope,actualHousingRend
 $('debugSegmentsLabel').hidden=!E.validateJointSurfacePolicy(PARTITION);
 $('pageMode').textContent='CAD 候选回放';$('scopeBadge').textContent='非安装验收';$('sliderLabel').textContent='H 位置示意';$('guideTag').hidden=!$('showGuide').checked;$('guideTag').textContent='解析导向假设';$('fixtureNotice').hidden=false;$('fixtureNotice').textContent='A3–A6 建模段 '+META.whole_rest_length_m.toFixed(3)+' m · '+(META.config.natural_mode==='initial_stress_free'?'CAD 初态无应力/静止':'直线无应力初态/静止')+' · 重力平衡未验证 · A6 自由摆转基线 · 内束 / H / 材料未校准 · 历史软U参数均匀全链假设，非实物标定';
 await phase('构建首帧几何',startupController.signal);if(!await choose(0))throw Error('首帧构建失败，请重试');await phase('绘制首帧',startupController.signal);requestAnimationFrame(render);
-})().catch(e=>{const s=document.getElementById('status');s.textContent=String(e);s.className='status stop';kr90LoadingUI.fatal(e);console.error(e);});
+})().catch(e=>{const s=document.getElementById('status');s.textContent=KR90Loading.errorMessage(e);s.className='status stop';kr90LoadingUI.fatal(e);console.error(e);});
